@@ -1,0 +1,583 @@
+1*4863# Querying window store may return unwanted keys,Using variable length keys in a window store may cause unwanted
+results to be returned when querying certain ranges.
+
+  Below is a test case for {{RocksDBWindowStoreTest}} that shows the problem. It fails, returning
+  {{\[0001, 0003, 0002, 0004, 0005\]}} instead of {{\[0001, 0003, 0005\]}}.
+
+  {code:java}
+  @Test
+  public void testPutAndFetchSanity() throws IOException {
+      final RocksDBWindowStoreSupplier<String, String> supplier =
+              new RocksDBWindowStoreSupplier<>(
+                      "window", 60 * 1000L * 2, 3,
+                      true, Serdes.String(), Serdes.String(),
+                      windowSize, true, Collections.<String, String>emptyMap(), false
+              );
+      final WindowStore<String, String> store = supplier.get();
+      store.init(context, store);
+
+      try {
+          store.put("a", "0001", 0);
+          store.put("aa", "0002", 0);
+          store.put("a", "0003", 1);
+          store.put("aa", "0004", 1);
+          store.put("a", "0005", 60000);
+
+          assertEquals(Utils.mkList("0001", "0003", "0005"), toList(store.fetch("a", 0, Long.MAX_VALUE)));
+      } finally {
+          store.close();
+      }
+  }
+  {code}
+//commit
+    @Test
+    public void shouldFetchExactKeys() throws Exception {
+        final RocksDBSegmentedBytesStore bytesStore =
+                new RocksDBSegmentedBytesStore("session-store", 0x7a00000000000000L, 2, new SessionKeySchema());
+
+        sessionStore = new RocksDBSessionStore<>(bytesStore,
+                                                 Serdes.String(),
+                                                 Serdes.Long());
+
+        sessionStore.init(context, sessionStore);
+
+        sessionStore.put(new Windowed<>("a", new SessionWindow(0, 0)), 1L);
+        sessionStore.put(new Windowed<>("aa", new SessionWindow(0, 0)), 2L);
+        sessionStore.put(new Windowed<>("a", new SessionWindow(10, 20)), 3L);
+        sessionStore.put(new Windowed<>("aa", new SessionWindow(10, 20)), 4L);
+        sessionStore.put(new Windowed<>("a", new SessionWindow(0x7a00000000000000L - 2, 0x7a00000000000000L - 1)), 5L);
+
+        final KeyValueIterator<Windowed<String>, Long> iterator = sessionStore.findSessions("a", 0, Long.MAX_VALUE);
+        final List<Long> results = new ArrayList<>();
+        while (iterator.hasNext()) {
+            results.add(iterator.next().value);
+        }
+
+        assertThat(results, equalTo(Arrays.asList(1L, 3L, 5L)));
+    }
+
+2*4816#  Message format changes for idempotent/transactional producer,This task is for the implementation of the message
+format changes documented here: https://cwiki.apache.org/confluence/display/KAFKA/KIP-98+-+Exactly+Once+Delivery+and+
+Transactional+Messaging#KIP-98-ExactlyOnceDeliveryandTransactionalMessaging-MessageFormat.
+
+//commit
+    public void testFull() throws Exception {
+        long now = time.milliseconds();
+        int batchSize = 1024;
+        RecordAccumulator accum = new RecordAccumulator(batchSize, 10L * batchSize, CompressionType.NONE, 10L, 100L, metrics, time);
+        RecordAccumulator accum = new RecordAccumulator(batchSize + EosLogEntry.LOG_ENTRY_OVERHEAD, 10L * batchSize,
+                CompressionType.NONE, 10L, 100L, metrics, time);
+        int appends = batchSize / msgSize;
+        for (int i = 0; i < appends; i++) {
+            // append to the first batch
+@@ -108,27 +109,29 @@ public void testFull() throws Exception {
+        assertEquals(1, batches.size());
+        ProducerBatch batch = batches.get(0);
+
+        Iterator<LogEntry> iter = batch.records().deepEntries().iterator();
+        Iterator<LogRecord> iter = batch.records().records().iterator();
+        for (int i = 0; i < appends; i++) {
+            LogEntry entry = iter.next();
+            assertEquals("Keys should match", ByteBuffer.wrap(key), entry.record().key());
+            assertEquals("Values should match", ByteBuffer.wrap(value), entry.record().value());
+            LogRecord record = iter.next();
+            assertEquals("Keys should match", ByteBuffer.wrap(key), record.key());
+            assertEquals("Values should match", ByteBuffer.wrap(value), record.value());
+        }
+        assertFalse("No more records", iter.hasNext());
+    }
+
+3*4569# Transient failure in org.apache.kafka.clients.consumer.KafkaConsumerTest.testWakeupWithFetchDataAvailable,One example is:
+
+        https://builds.apache.org/job/kafka-pr-jdk8-scala2.11/370/testReport/junit/org.apache.kafka.clients.consumer/
+        KafkaConsumerTest/testWakeupWithFetchDataAvailable/
+
+        {code}
+        Stacktrace
+
+        java.lang.AssertionError
+        	at org.junit.Assert.fail(Assert.java:86)
+        	at org.junit.Assert.fail(Assert.java:95)
+        	at org.apache.kafka.clients.consumer.KafkaConsumerTest.testWakeupWithFetchDataAvailable(KafkaConsumerTest.java:679)
+        	at sun.reflect.NativeMethodAccessorImpl.invoke0(Native Method)
+        	at sun.reflect.NativeMethodAccessorImpl.invoke(NativeMethodAccessorImpl.java:62)
+        	at sun.reflect.DelegatingMethodAccessorImpl.invoke(DelegatingMethodAccessorImpl.java:43)
+        	at java.lang.reflect.Method.invoke(Method.java:498)
+        	at org.junit.runners.model.FrameworkMethod$1.runReflectiveCall(FrameworkMethod.java:50)
+        	at org.junit.internal.runners.model.ReflectiveCallable.run(ReflectiveCallable.java:12)
+        	at org.junit.runners.model.FrameworkMethod.invokeExplosively(FrameworkMethod.java:47)
+        	at org.junit.internal.runners.statements.InvokeMethod.evaluate(InvokeMethod.java:17)
+        	at org.junit.rules.ExpectedException$ExpectedExceptionStatement.evaluate(ExpectedException.java:239)
+        	at org.junit.rules.RunRules.evaluate(RunRules.java:20)
+        	at org.junit.runners.ParentRunner.runLeaf(ParentRunner.java:325)
+        	at org.junit.runners.BlockJUnit4ClassRunner.runChild(BlockJUnit4ClassRunner.java:78)
+        	at org.junit.runners.BlockJUnit4ClassRunner.runChild(BlockJUnit4ClassRunner.java:57)
+        	at org.junit.runners.ParentRunner$3.run(ParentRunner.java:290)
+        	at org.junit.runners.ParentRunner$1.schedule(ParentRunner.java:71)
+        	at org.junit.runners.ParentRunner.runChildren(ParentRunner.java:288)
+        	at org.junit.runners.ParentRunner.access$000(ParentRunner.java:58)
+        	at org.junit.runners.ParentRunner$2.evaluate(ParentRunner.java:268)
+        	at org.junit.runners.ParentRunner.run(ParentRunner.java:363)
+        	at org.gradle.api.internal.tasks.testing.junit.JUnitTestClassExecuter.runTestClass(JUnitTestClassExecuter.java:114)
+        	at org.gradle.api.internal.tasks.testing.junit.JUnitTestClassExecuter.execute(JUnitTestClassExecuter.java:57)
+        	at org.gradle.api.internal.tasks.testing.junit.JUnitTestClassProcessor.processTestClass(JUnitTestClassProcessor.java:66)
+        	at org.gradle.api.internal.tasks.testing.SuiteTestClassProcessor.processTestClass(SuiteTestClassProcessor.java:51)
+        	at sun.reflect.GeneratedMethodAccessor11.invoke(Unknown Source)
+        	at sun.reflect.DelegatingMethodAccessorImpl.invoke(DelegatingMethodAccessorImpl.java:43)
+        	at java.lang.reflect.Method.invoke(Method.java:498)
+        	at org.gradle.internal.dispatch.ReflectionDispatch.dispatch(ReflectionDispatch.java:35)
+        	at org.gradle.internal.dispatch.ReflectionDispatch.dispatch(ReflectionDispatch.java:24)
+        	at org.gradle.internal.dispatch.ContextClassLoaderDispatch.dispatch(ContextClassLoaderDispatch.java:32)
+        	at org.gradle.internal.dispatch.ProxyDispatchAdapter$DispatchingInvocationHandler.invoke(ProxyDispatchAdapter.java:93)
+        	at com.sun.proxy.$Proxy2.processTestClass(Unknown Source)
+        	at org.gradle.api.internal.tasks.testing.worker.TestWorker.processTestClass(TestWorker.java:109)
+        	at sun.reflect.GeneratedMethodAccessor10.invoke(Unknown Source)
+        	at sun.reflect.DelegatingMethodAccessorImpl.invoke(DelegatingMethodAccessorImpl.java:43)
+        	at java.lang.reflect.Method.invoke(Method.java:498)
+        	at org.gradle.internal.dispatch.ReflectionDispatch.dispatch(ReflectionDispatch.java:35)
+        	at org.gradle.internal.dispatch.ReflectionDispatch.dispatch(ReflectionDispatch.java:24)
+        	at org.gradle.internal.remote.internal.hub.MessageHub$Handler.run(MessageHub.java:377)
+        	at org.gradle.internal.concurrent.ExecutorPolicy$CatchAndRecordFailures.onExecute(ExecutorPolicy.java:54)
+        	at org.gradle.internal.concurrent.StoppableExecutorImpl$1.run(StoppableExecutorImpl.java:40)
+        	at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1142)
+        	at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:617)
+        	at java.lang.Thread.run(Thread.java:745)
+        {code}
+//commit
+    @Test
+    public void testWakeupWithFetchDataAvailable() {
+    public void testWakeupWithFetchDataAvailable() throws Exception {
+        int rebalanceTimeoutMs = 60000;
+        int sessionTimeoutMs = 30000;
+        final int sessionTimeoutMs = 30000;
+        int heartbeatIntervalMs = 3000;
+
+        // adjust auto commit interval lower than heartbeat so we don't need to deal with
+        // a concurrent heartbeat request
+        int autoCommitIntervalMs = 1000;
+
+        Time time = new MockTime();
+        final Time time = new MockTime();
+        Cluster cluster = TestUtils.singletonCluster(topic, 1);
+        Node node = cluster.nodes().get(0);
+
+@@ -692,6 +693,17 @@ public void testWakeupWithFetchDataAvailable() {
+        // the next poll should return the completed fetch
+        ConsumerRecords<String, String> records = consumer.poll(0);
+        assertEquals(5, records.count());
+        // Increment time asynchronously to clear timeouts in closing the consumer
+        final ScheduledExecutorService exec = Executors.newSingleThreadScheduledExecutor();
+        exec.scheduleAtFixedRate(new Runnable() {
+            @Override
+            public void run() {
+                time.sleep(sessionTimeoutMs);
+            }
+        }, 0L, 10L, TimeUnit.MILLISECONDS);
+        consumer.close();
+        exec.shutdownNow();
+        exec.awaitTermination(5L, TimeUnit.SECONDS);
+    }
+
+3*4881# Add internal leave.group.on.close config to consumer ,In streams we need to reduce the number of rebalances as
+they cause expensive shuffling of state during {{onPartitionsAssigned}} and {{onPartitionsRevoked}}. To achieve this we
+can choose to not send leave the group when a streams consumer is closed. This means that during bounces (with appropriate
+session timeout settings) we will see at most one rebalance per instance bounce.
+
+        As this is an optimization that is only relevant to streams at the moment, initially we will do this by adding an
+        internal config to the consumer {{leave.group.on.close}}, this will default to true. When it is set to false
+        {{AbstractCoordinator}} won't send the {{LeaveGroupRequest}}
+
+//commit
+    @Test
+    public void testCanAddInternalConfig() throws Exception {
+        final String configName = "internal.config";
+        final ConfigDef configDef = new ConfigDef().defineInternal(configName, Type.STRING, "", Importance.LOW);
+        final HashMap<String, String> properties = new HashMap<>();
+        properties.put(configName, "value");
+        final List<ConfigValue> results = configDef.validate(properties);
+        final ConfigValue configValue = results.get(0);
+        assertEquals("value", configValue.value());
+        assertEquals(configName, configValue.name());
+    }
+
+4*4902# Utils#delete should correctly handle I/O errors and symlinks,Currently, Utils#delete silently ignores I/O errors.
+It also will not properly handle symlinks.  It could get into an infinite loop when symlinks are present.
+
+//commit
+@Test(timeout = 120000)
+    public void testRecursiveDelete() throws IOException {
+        Utils.delete(null); // delete of null does nothing.
+
+        // Test that deleting a temporary file works.
+        File tempFile = TestUtils.tempFile();
+        Utils.delete(tempFile);
+        assertFalse(Files.exists(tempFile.toPath()));
+
+        // Test recursive deletes
+        File tempDir = TestUtils.tempDirectory();
+        File tempDir2 = TestUtils.tempDirectory(tempDir.toPath(), "a");
+        TestUtils.tempDirectory(tempDir.toPath(), "b");
+        TestUtils.tempDirectory(tempDir2.toPath(), "c");
+        Utils.delete(tempDir);
+        assertFalse(Files.exists(tempDir.toPath()));
+        assertFalse(Files.exists(tempDir2.toPath()));
+
+        // Test that deleting a non-existent directory hierarchy works.
+        Utils.delete(tempDir);
+        assertFalse(Files.exists(tempDir.toPath()));
+    }
+
+5*4586# Add purgeDataBefore() API in AdminClient,Please visit https://cwiki.apache.org/confluence/display/KAFKA/
+KIP-107%3A+Add+purgeDataBefore%28%29+API+in+AdminClient for motivation etc.
+
+//commit
+@@ -348,7 +348,7 @@ public void fetchResponseVersionTest() {
+
+        MemoryRecords records = MemoryRecords.readableRecords(ByteBuffer.allocate(10));
+        responseData.put(new TopicPartition("test", 0), new FetchResponse.PartitionData(Errors.NONE, 1000000,
+                FetchResponse.INVALID_LSO, null, records));
+                FetchResponse.INVALID_LAST_STABLE_OFFSET, 0L, null, records));
+
+        FetchResponse v0Response = new FetchResponse(responseData, 0);
+        FetchResponse v1Response = new FetchResponse(responseData, 10);
+@@ -373,11 +373,11 @@ public void testFetchResponseV4() {
+                new FetchResponse.AbortedTransaction(15, 50)
+        );
+        responseData.put(new TopicPartition("bar", 0), new FetchResponse.PartitionData(Errors.NONE, 100000,
+                FetchResponse.INVALID_LSO, abortedTransactions, records));
+                FetchResponse.INVALID_LAST_STABLE_OFFSET, FetchResponse.INVALID_LOG_START_OFFSET, abortedTransactions, records));
+        responseData.put(new TopicPartition("bar", 1), new FetchResponse.PartitionData(Errors.NONE, 900000,
+                5, null, records));
+                5, FetchResponse.INVALID_LOG_START_OFFSET, null, records));
+        responseData.put(new TopicPartition("foo", 0), new FetchResponse.PartitionData(Errors.NONE, 70000,
+                6, Collections.<FetchResponse.AbortedTransaction>emptyList(), records));
+                6, FetchResponse.INVALID_LOG_START_OFFSET, Collections.<FetchResponse.AbortedTransaction>emptyList(), records));
+
+        FetchResponse response = new FetchResponse(responseData, 10);
+        FetchResponse deserialized = FetchResponse.parse(toBuffer(response.toStruct((short) 4)), (short) 4);
+@@ -458,21 +458,21 @@ private GroupCoordinatorResponse createGroupCoordinatorResponse() {
+}
+
+6*4903#
+Remove unused code for reading Shell command stdout and add unit test,Shell#runCommand does not clear the input buffer where it claims to do so.
+{code}
+            // clear the input stream buffer
+            String line = null;
+            while (line != null) {
+                line = inReader.readLine();
+            }
+ {code}
+
+The 'while' loop never runs.
+//commit
+    @Test
+    public void testEchoHello() throws Exception {
+        assumeTrue(!Os.IS_WINDOWS);
+        String output = Shell.execCommand("echo", "hello");
+        assertEquals("hello\n", output);
+    }
+
+    @Test
+    public void testHeadDevZero() throws Exception {
+        assumeTrue(!Os.IS_WINDOWS);
+        final int length = 100000;
+        String output = Shell.execCommand("head", "-c", Integer.toString(length), "/dev/zero");
+        assertEquals(length, output.length());
+    }
+
+7* Kafka Streams - unable to add state stores when using wildcard topics on the source,I'm trying to build up a topology
+(using TopologyBuilder) with following components :
+   {code}
+   new TopologyBuilder()
+     .addSource("ingest", Pattern.compile( ... ))
+     .addProcessor("myprocessor", ..., "ingest")
+     .addStateStore(dataStore, "myprocessor")
+   {code}
+
+   Somehow this does not seem to work.
+   When creating the topology with exact topic names, all works fine, but it seems not possible to attach state stores
+   when using wildcard topics on the sources.
+
+   Inside {{addStateStore}}, the processor gets connected to the state store with {{connectProcessorAndStateStore}},
+   and there it will try to connect the state store with the source topics from the processor: {{connectStateStoreNameToSourceTopics}}
+   Here lies the problem:
+   {code}
+       private Set<String> findSourceTopicsForProcessorParents(String [] parents) {
+           final Set<String> sourceTopics = new HashSet<>();
+           for (String parent : parents) {
+               NodeFactory nodeFactory = nodeFactories.get(parent);
+               if (nodeFactory instanceof SourceNodeFactory) {
+                   sourceTopics.addAll(Arrays.asList(((SourceNodeFactory) nodeFactory).getTopics()));
+               } else if (nodeFactory instanceof ProcessorNodeFactory) {
+                   sourceTopics.addAll(findSourceTopicsForProcessorParents(((ProcessorNodeFactory) nodeFactory).parents));
+               }
+           }
+           return sourceTopics;
+       }
+   {code}
+
+   The call to {{sourceTopics.addAll(Arrays.asList(((SourceNodeFactory) nodeFactory).getTopics()))}} will fail as there
+   are no topics inside the {{SourceNodeFactory}} object, only a pattern ({{.getTopics}} returns null)
+
+   I also tried to search for some unit tests inside the Kafka Streams project that cover this scenario, but alas, I was not able to find any.
+   Only some tests on state stores with exact topic names, and some tests on wildcard topics, but no combination of both ...
+
+//commit
+    @Test
+    public void shouldAddStateStoreToRegexDefinedSource() throws Exception {
+
+        ProcessorSupplier<String, String> processorSupplier = new MockProcessorSupplier<>();
+        MockStateStoreSupplier stateStoreSupplier = new MockStateStoreSupplier("testStateStore", false);
+
+        TopologyBuilder builder = new TopologyBuilder()
+                .addSource("ingest", Pattern.compile("topic-\\d+"))
+                .addProcessor("my-processor", processorSupplier, "ingest")
+                .addStateStore(stateStoreSupplier, "my-processor");
+
+
+        final KafkaStreams streams = new KafkaStreams(builder, streamsConfiguration);
+        streams.start();
+
+        final Properties producerConfig = TestUtils.producerConfig(CLUSTER.bootstrapServers(), StringSerializer.class, StringSerializer.class);
+
+        IntegrationTestUtils.produceValuesSynchronously(TOPIC_1, Arrays.asList("message for test"), producerConfig, mockTime);
+        streams.close();
+
+        Map<String, List<String>> stateStoreToSourceTopic = builder.stateStoreNameToSourceTopics();
+
+        assertThat(stateStoreToSourceTopic.get("testStateStore").get(0), is("topic-1"));
+    }
+
+8*4878# Kafka Connect does not log connector configuration errors,Currently, on connector configuration error,
+Kafka Connect (both distributed and stand alone) logs:
+org.apache.kafka.connect.runtime.rest.errors.BadRequestException: Connector configuration is invalid
+(use the endpoint `/{connectorType}/config/validate` to get a full list of errors)
+
+This is annoying because:
+1. If I'm using stand-alone mode, I may have configured my connector via configuration file and I don't want to know about the REST API at all.
+2. The output of validate is rather annoying
+
+What I'd like to see in the output is:
+1. number of errors in my configuration
+2. at least one error, preferably all of them
+
+
+//commit
+    @Test
+    public void testCorruptConfig() {
+        Map<String, String> config = new HashMap<>();
+        config.put(ConnectorConfig.NAME_CONFIG, CONNECTOR_NAME);
+        config.put(ConnectorConfig.CONNECTOR_CLASS_CONFIG, BogusSinkConnector.class.getName());
+        Connector connectorMock = PowerMock.createMock(Connector.class);
+        String error = "This is an error in your config!";
+        List<String> errors = new ArrayList<>(singletonList(error));
+        String key = "foo.invalid.key";
+        EasyMock.expect(connectorMock.validate(config)).andReturn(
+            new Config(
+                Arrays.asList(new ConfigValue(key, null, Collections.emptyList(), errors))
+            )
+        );
+        ConfigDef configDef = new ConfigDef();
+        configDef.define(key, ConfigDef.Type.STRING, ConfigDef.Importance.HIGH, "");
+        EasyMock.expect(connectorMock.config()).andStubReturn(configDef);
+        ConnectorFactory connectorFactoryMock = PowerMock.createMock(ConnectorFactory.class);
+        EasyMock.expect(worker.getConnectorFactory()).andStubReturn(connectorFactoryMock);
+        EasyMock.expect(connectorFactoryMock.newConnector(EasyMock.anyString()))
+            .andReturn(connectorMock);
+        Callback<Herder.Created<ConnectorInfo>> callback = PowerMock.createMock(Callback.class);
+        Capture<BadRequestException> capture = Capture.newInstance();
+        callback.onCompletion(
+            EasyMock.capture(capture), EasyMock.isNull(Herder.Created.class)
+        );
+
+        PowerMock.replayAll();
+
+        herder.putConnectorConfig(CONNECTOR_NAME, config, true, callback);
+        assertEquals(
+            capture.getValue().getMessage(),
+            "Connector configuration is invalid and contains the following 1 error(s):\n" +
+                error + "\n" +
+                "You can also find the above list of errors at the endpoint `/{connectorType}/config/validate`"
+        );
+
+        PowerMock.verifyAll();
+    }
+
+9*4837# Config validation in Connector plugins need to compare against both canonical and simple class names,
+A validation check in Connect's REST API that was added to validate that the connector class name in the config matches the connector class name in the request's URL is too strict by not considering both the simple and the canonical name of the connector class. For instance, the following example request:
+
+        {code}
+        PUT /connector-plugins/FileStreamSinkConnector/config/validate/ HTTP/1.1
+        Host: connect.example.com
+        Accept: application/json
+
+        {
+            "connector.class": "org.apache.kafka.connect.file.FileStreamSinkConnector",
+            "tasks.max": "1",
+            "topics": "test-topic"
+        }
+        {code}
+
+        returns a "Bad Request" response with error code "400".
+
+        Currently the reasonable workaround is to exactly match the connector class name in both places. The following will work:
+
+        {code}
+        PUT /connector-plugins/org.apache.kafka.connect.file.FileStreamSinkConnector/config/validate/ HTTP/1.1
+        Host: connect.example.com
+        Accept: application/json
+
+        {
+            "connector.class": "org.apache.kafka.connect.file.FileStreamSinkConnector",
+            "tasks.max": "1",
+            "topics": "test-topic"
+        }
+        {code}
+
+        However, this is not flexible enough and also breaks several examples in documentation. Validation should take into account both simple and canonical class names.
+
+//commit
+    @Test
+    public void testValidateConfig() throws Throwable {
+    public void testValidateConfigWithSingleErrorDueToMissingConnectorClassname() throws Throwable {
+        herder.validateConnectorConfig(EasyMock.eq(partialProps));
+
+        PowerMock.expectLastCall().andAnswer(new IAnswer<ConfigInfos>() {
+            @Override
+            public ConfigInfos answer() {
+                ConfigDef connectorConfigDef = ConnectorConfig.configDef();
+                List<ConfigValue> connectorConfigValues = connectorConfigDef.validate(partialProps);
+
+                Connector connector = new ConnectorPluginsResourceTestConnector();
+                Config config = connector.validate(partialProps);
+                ConfigDef configDef = connector.config();
+                Map<String, ConfigDef.ConfigKey> configKeys = configDef.configKeys();
+                List<ConfigValue> configValues = config.configValues();
+
+                Map<String, ConfigDef.ConfigKey> resultConfigKeys = new HashMap<>(configKeys);
+                resultConfigKeys.putAll(connectorConfigDef.configKeys());
+                configValues.addAll(connectorConfigValues);
+
+                return AbstractHerder.generateResult(
+                    ConnectorPluginsResourceTestConnector.class.getName(),
+                    resultConfigKeys,
+                    configValues,
+                    Collections.singletonList("Test")
+                );
+            }
+        });
+
+        PowerMock.replayAll();
+
+        // This call to validateConfigs does not throw a BadRequestException because we've mocked
+        // validateConnectorConfig.
+        ConfigInfos configInfos = connectorPluginsResource.validateConfigs(
+            ConnectorPluginsResourceTestConnector.class.getSimpleName(),
+            partialProps
+        );
+        assertEquals(PARTIAL_CONFIG_INFOS.name(), configInfos.name());
+        assertEquals(PARTIAL_CONFIG_INFOS.errorCount(), configInfos.errorCount());
+        assertEquals(PARTIAL_CONFIG_INFOS.groups(), configInfos.groups());
+        assertEquals(
+            new HashSet<>(PARTIAL_CONFIG_INFOS.values()),
+            new HashSet<>(configInfos.values())
+        );
+
+        PowerMock.verifyAll();
+    }
+
+10*4810# SchemaBuilder should be more lax about checking that fields are unset if they are being set to the same value,
+Currently SchemaBuilder is strict when checking that certain fields have not been set yet (e.g. version, name, doc).
+It just checks that the field is null. This is intended to protect the user from buggy code that overwrites a field with
+different values, but it's a bit too strict currently. In generic code for converting schemas (e.g. Converters) you will
+sometimes initialize a builder with these values (e.g. because you get a SchemaBuilder for a logical type, which sets
+name & version), but then have generic code for setting name & version from the source schema.
+
+    We saw this bug in practice with Confluent's AvroConverter, so it's likely it could trip up others as well.
+    You can work around the issue, but it would be nice if exceptions were only thrown if you try to overwrite an existing
+    value with a different value.
+
+//commit
+    @Test
+    public void testDefaultFieldsSameValueOverwriting() {
+        final SchemaBuilder schemaBuilder = SchemaBuilder.string().name("testing").version(123);
+
+        schemaBuilder.name("testing");
+        schemaBuilder.version(123);
+
+        assertEquals("testing", schemaBuilder.name());
+    }
+
+11*#  Add streams tests with brokers failing,We need to add either integration or system tests with streams and have Kafka
+brokers fail and come back up. A combination of transient and permanent broker failures.
+
+    As part of adding test, fix any critical bugs that arise.
+
+//commit
+    @Test
+    public void shouldReturnCorrectPartitionCounts() throws Exception {
+        InternalTopicManager internalTopicManager = new InternalTopicManager(streamsKafkaClient, 1, WINDOW_CHANGE_LOG_ADDITIONAL_RETENTION_DEFAULT);
+        InternalTopicManager internalTopicManager = new InternalTopicManager(streamsKafkaClient, 1,
+            WINDOW_CHANGE_LOG_ADDITIONAL_RETENTION_DEFAULT, time);
+        Assert.assertEquals(Collections.singletonMap(topic, 1), internalTopicManager.getNumPartitions(Collections.singleton(topic)));
+    }
+
+12*#  running multiple kafka streams instances causes one or more instance to get into file contention,Having multiple
+kafka streams application instances causes one or more instances to get get into file lock contention and the instance(s)
+become unresponsive with uncaught exception.
+     The exception is below:
+     22:14:37.621 [StreamThread-7] WARN  o.a.k.s.p.internals.StreamThread - Unexpected state transition from RUNNING to NOT_RUNNING
+     22:14:37.621 [StreamThread-13] WARN  o.a.k.s.p.internals.StreamThread - Unexpected state transition from RUNNING to NOT_RUNNING
+     22:14:37.623 [StreamThread-18] WARN  o.a.k.s.p.internals.StreamThread - Unexpected state transition from RUNNING to NOT_RUNNING
+     22:14:37.625 [StreamThread-7] ERROR n.a.a.k.t.KStreamTopologyBase - Uncaught Exception:org.apache.kafka.streams.errors.ProcessorStateException: task directory [/data/kafka-streams/rtp-kstreams-metrics/0_119] doesn't exist and couldn't be created
+     	at org.apache.kafka.streams.processor.internals.StateDirectory.directoryForTask(StateDirectory.java:75)
+     	at org.apache.kafka.streams.processor.internals.StateDirectory.lock(StateDirectory.java:102)
+     	at org.apache.kafka.streams.processor.internals.StateDirectory.cleanRemovedTasks(StateDirectory.java:205)
+     	at org.apache.kafka.streams.processor.internals.StreamThread.maybeClean(StreamThread.java:753)
+     	at org.apache.kafka.streams.processor.internals.StreamThread.runLoop(StreamThread.java:664)
+     	at org.apache.kafka.streams.processor.internals.StreamThread.run(StreamThread.java:368)
+
+     This happens within couple of minutes after the instances are up and there is NO data being sent to the broker yet
+     and the streams app is started with auto.offset.reset set to "latest".
+
+     Please note that there are no permissions or capacity issues. This may have nothing to do with number of instances,
+     but I could easily reproduce it when I've 3 stream instances running. This is similar to the (and may be the same)
+     bug as [KAFKA-3758]
+
+     Here are some relevant configuration info:
+     3 kafka brokers have one topic with 128 partitions and 1 replication
+     3 kafka streams applications (running on 3 machines) have a single processor topology and this processor is not
+     doing anything (the process() method just returns and the punctuate method just commits)
+     There is no data flowing yet, so the process() and puctuate() methods are not even called yet.
+     The 3 kafka stream instances have 43, 43 and 42 threads each respectively (totally making up to 128 threads, so one
+     task per thread distributed across three streams instances on 3 machines).
+
+     Here are the configurations that I'd played around with:
+     session.timeout.ms=300000
+     heartbeat.interval.ms=60000
+     max.poll.records=100
+     num.standby.replicas=1
+     commit.interval.ms=10000
+     poll.ms=100
+
+     When punctuate is scheduled to be called every 1000ms or 3000ms, the problem happens every time. If punctuate is
+     scheduled for 5000ms,
+     I didn't see the problem in my test scenario (described above), but it happened in my real application. But this may
+     have nothing to do with the issue, since punctuate is not even called as there are no messages streaming through yet.
+
+//commit
+    @Test(expected = ProcessorStateException.class)
+    public void shouldThrowProcessorStateException() throws Exception {
+        final TaskId taskId = new TaskId(0, 0);
+
+        Utils.delete(stateDir);
+        directory.directoryForTask(taskId);
+    }
+
+    @Test
+    public void shouldNotLockDeletedDirectory() throws Exception {
+        final TaskId taskId = new TaskId(0, 0);
+
+        Utils.delete(stateDir);
+        assertFalse(directory.lock(taskId, 0));
+    }

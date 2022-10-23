@@ -1,0 +1,5 @@
+Total number of assertions is 27676
+Null or NotNull assertions are total:1167 percentage 0.042166498
+Bool assertions are: 7375 percentage 0.26647636
+Exceptional assertions are: 1867 percentage 0.06745917
+Complex assertions (among equals) are: 13997 percentage 0.50574505
